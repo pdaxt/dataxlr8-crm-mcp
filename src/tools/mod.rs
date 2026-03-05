@@ -1,9 +1,9 @@
+use dataxlr8_mcp_core::mcp::{error_result, get_f64, get_i64, get_str, get_str_array, json_result, make_schema};
 use dataxlr8_mcp_core::Database;
 use rmcp::model::*;
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tracing::info;
 
 // ============================================================================
@@ -66,38 +66,29 @@ pub struct Task {
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ContactTag {
+    pub id: uuid::Uuid,
+    pub contact_id: uuid::Uuid,
+    pub tag: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ContactInteraction {
+    pub id: uuid::Uuid,
+    pub contact_id: uuid::Uuid,
+    pub interaction_type: String,
+    pub subject: Option<String>,
+    pub notes: Option<String>,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PipelineRow {
     pub stage: String,
     pub deal_count: i64,
     pub total_value: Option<String>,
-}
-
-// ============================================================================
-// Tool schema helpers
-// ============================================================================
-
-fn make_schema(
-    properties: serde_json::Value,
-    required: Vec<&str>,
-) -> Arc<serde_json::Map<String, serde_json::Value>> {
-    let mut m = serde_json::Map::new();
-    m.insert(
-        "type".to_string(),
-        serde_json::Value::String("object".to_string()),
-    );
-    m.insert("properties".to_string(), properties);
-    if !required.is_empty() {
-        m.insert(
-            "required".to_string(),
-            serde_json::Value::Array(
-                required
-                    .into_iter()
-                    .map(|s| serde_json::Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
-    }
-    Arc::new(m)
 }
 
 fn build_tools() -> Vec<Tool> {
@@ -328,6 +319,45 @@ fn build_tools() -> Vec<Tool> {
             icons: None,
             meta: None,
         },
+        Tool {
+            name: "add_interaction".into(),
+            title: None,
+            description: Some(
+                "Log an interaction (call, email, meeting, note) with a contact".into(),
+            ),
+            input_schema: make_schema(
+                serde_json::json!({
+                    "contact_id": { "type": "string", "description": "UUID of the contact" },
+                    "interaction_type": { "type": "string", "enum": ["call", "email", "meeting", "note", "other"], "description": "Interaction type" },
+                    "subject": { "type": "string", "description": "Subject/title" },
+                    "notes": { "type": "string", "description": "Details" }
+                }),
+                vec!["contact_id", "interaction_type"],
+            ),
+            output_schema: None,
+            annotations: None,
+            execution: None,
+            icons: None,
+            meta: None,
+        },
+        Tool {
+            name: "tag_contact".into(),
+            title: None,
+            description: Some("Add or remove tags from a contact (stored in contact_tags table)".into()),
+            input_schema: make_schema(
+                serde_json::json!({
+                    "contact_id": { "type": "string", "description": "UUID of the contact" },
+                    "add": { "type": "array", "items": { "type": "string" }, "description": "Tags to add" },
+                    "remove": { "type": "array", "items": { "type": "string" }, "description": "Tags to remove" }
+                }),
+                vec!["contact_id"],
+            ),
+            output_schema: None,
+            annotations: None,
+            execution: None,
+            icons: None,
+            meta: None,
+        },
     ]
 }
 
@@ -356,59 +386,23 @@ impl CrmMcpServer {
         Self { db }
     }
 
-    fn json_result<T: Serialize>(data: &T) -> CallToolResult {
-        match serde_json::to_string_pretty(data) {
-            Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
-                "Serialization error: {e}"
-            ))]),
-        }
-    }
-
-    fn error_result(msg: &str) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(msg.to_string())])
-    }
-
-    fn get_str(args: &serde_json::Value, key: &str) -> Option<String> {
-        args.get(key).and_then(|v| v.as_str()).map(String::from)
-    }
-
-    fn get_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
-        args.get(key).and_then(|v| v.as_i64())
-    }
-
-    fn get_f64(args: &serde_json::Value, key: &str) -> Option<f64> {
-        args.get(key).and_then(|v| v.as_f64())
-    }
-
-    fn get_str_array(args: &serde_json::Value, key: &str) -> Vec<String> {
-        args.get(key)
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     fn parse_uuid(s: &str) -> Result<uuid::Uuid, CallToolResult> {
         uuid::Uuid::parse_str(s)
-            .map_err(|_| Self::error_result(&format!("Invalid UUID: {s}")))
+            .map_err(|_| error_result(&format!("Invalid UUID: {s}")))
     }
 
     // ---- Tool handlers ----
 
     async fn handle_create_contact(&self, args: &serde_json::Value) -> CallToolResult {
-        let email = Self::get_str(args, "email");
-        let first_name = Self::get_str(args, "first_name");
-        let last_name = Self::get_str(args, "last_name");
-        let company = Self::get_str(args, "company");
-        let title = Self::get_str(args, "title");
-        let phone = Self::get_str(args, "phone");
-        let linkedin_url = Self::get_str(args, "linkedin_url");
-        let source = Self::get_str(args, "source");
-        let tags = Self::get_str_array(args, "tags");
+        let email = get_str(args, "email");
+        let first_name = get_str(args, "first_name");
+        let last_name = get_str(args, "last_name");
+        let company = get_str(args, "company");
+        let title = get_str(args, "title");
+        let phone = get_str(args, "phone");
+        let linkedin_url = get_str(args, "linkedin_url");
+        let source = get_str(args, "source");
+        let tags = get_str_array(args, "tags");
 
         match sqlx::query_as::<_, Contact>(
             r#"INSERT INTO crm.contacts (email, first_name, last_name, company, title, phone, linkedin_url, source, tags)
@@ -429,20 +423,20 @@ impl CrmMcpServer {
         {
             Ok(contact) => {
                 info!(email = ?email, "Created contact");
-                Self::json_result(&contact)
+                json_result(&contact)
             }
-            Err(e) => Self::error_result(&format!("Failed to create contact: {e}")),
+            Err(e) => error_result(&format!("Failed to create contact: {e}")),
         }
     }
 
     async fn handle_search_contacts(&self, args: &serde_json::Value) -> CallToolResult {
-        let query = match Self::get_str(args, "query") {
+        let query = match get_str(args, "query") {
             Some(q) => q,
-            None => return Self::error_result("Missing required parameter: query"),
+            None => return error_result("Missing required parameter: query"),
         };
-        let tag = Self::get_str(args, "tag");
-        let limit = Self::get_i64(args, "limit").unwrap_or(50);
-        let offset = Self::get_i64(args, "offset").unwrap_or(0);
+        let tag = get_str(args, "tag");
+        let limit = get_i64(args, "limit").unwrap_or(50);
+        let offset = get_i64(args, "offset").unwrap_or(0);
         let pattern = format!("%{query}%");
 
         let contacts: Vec<Contact> = if let Some(tag) = &tag {
@@ -461,7 +455,7 @@ impl CrmMcpServer {
             .await
             {
                 Ok(c) => c,
-                Err(e) => return Self::error_result(&format!("Search failed: {e}")),
+                Err(e) => return error_result(&format!("Search failed: {e}")),
             }
         } else {
             match sqlx::query_as::<_, Contact>(
@@ -477,43 +471,43 @@ impl CrmMcpServer {
             .await
             {
                 Ok(c) => c,
-                Err(e) => return Self::error_result(&format!("Search failed: {e}")),
+                Err(e) => return error_result(&format!("Search failed: {e}")),
             }
         };
 
-        Self::json_result(&contacts)
+        json_result(&contacts)
     }
 
     async fn handle_upsert_deal(&self, args: &serde_json::Value) -> CallToolResult {
-        let title = match Self::get_str(args, "title") {
+        let title = match get_str(args, "title") {
             Some(t) => t,
-            None => return Self::error_result("Missing required parameter: title"),
+            None => return error_result("Missing required parameter: title"),
         };
-        let contact_id = match Self::get_str(args, "contact_id") {
+        let contact_id = match get_str(args, "contact_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
             },
             None => None,
         };
-        let stage = Self::get_str(args, "stage").unwrap_or_else(|| "lead".into());
+        let stage = get_str(args, "stage").unwrap_or_else(|| "lead".into());
         if !VALID_STAGES.contains(&stage.as_str()) {
-            return Self::error_result(&format!(
+            return error_result(&format!(
                 "Invalid stage '{stage}'. Must be one of: {}",
                 VALID_STAGES.join(", ")
             ));
         }
-        let value = Self::get_f64(args, "value");
-        let owner_id = match Self::get_str(args, "owner_id") {
+        let value = get_f64(args, "value");
+        let owner_id = match get_str(args, "owner_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
             },
             None => None,
         };
-        let expected_close = Self::get_str(args, "expected_close")
+        let expected_close = get_str(args, "expected_close")
             .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
-        let notes = Self::get_str(args, "notes");
+        let notes = get_str(args, "notes");
 
         // Need a unique constraint for upsert. We'll use title + contact_id.
         // First ensure the constraint exists (idempotent).
@@ -561,32 +555,32 @@ impl CrmMcpServer {
         match result {
             Ok(deal) => {
                 info!(title = title, stage = stage, "Upserted deal");
-                Self::json_result(&deal)
+                json_result(&deal)
             }
-            Err(e) => Self::error_result(&format!("Failed to upsert deal: {e}")),
+            Err(e) => error_result(&format!("Failed to upsert deal: {e}")),
         }
     }
 
     async fn handle_move_deal(&self, args: &serde_json::Value) -> CallToolResult {
-        let deal_id_str = match Self::get_str(args, "deal_id") {
+        let deal_id_str = match get_str(args, "deal_id") {
             Some(s) => s,
-            None => return Self::error_result("Missing required parameter: deal_id"),
+            None => return error_result("Missing required parameter: deal_id"),
         };
         let deal_id = match Self::parse_uuid(&deal_id_str) {
             Ok(u) => u,
             Err(e) => return e,
         };
-        let new_stage = match Self::get_str(args, "new_stage") {
+        let new_stage = match get_str(args, "new_stage") {
             Some(s) => s,
-            None => return Self::error_result("Missing required parameter: new_stage"),
+            None => return error_result("Missing required parameter: new_stage"),
         };
         if !VALID_STAGES.contains(&new_stage.as_str()) {
-            return Self::error_result(&format!(
+            return error_result(&format!(
                 "Invalid stage '{new_stage}'. Must be one of: {}",
                 VALID_STAGES.join(", ")
             ));
         }
-        let notes = Self::get_str(args, "notes");
+        let notes = get_str(args, "notes");
 
         // Get old stage for activity log
         let old: Option<Deal> = match sqlx::query_as(
@@ -597,12 +591,12 @@ impl CrmMcpServer {
         .await
         {
             Ok(d) => d,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         let old = match old {
             Some(d) => d,
-            None => return Self::error_result(&format!("Deal '{deal_id}' not found")),
+            None => return error_result(&format!("Deal '{deal_id}' not found")),
         };
 
         // Update stage
@@ -615,7 +609,7 @@ impl CrmMcpServer {
         .await
         {
             Ok(d) => d,
-            Err(e) => return Self::error_result(&format!("Failed to move deal: {e}")),
+            Err(e) => return error_result(&format!("Failed to move deal: {e}")),
         };
 
         // Auto-log activity
@@ -632,36 +626,36 @@ impl CrmMcpServer {
         .await;
 
         info!(deal_id = %deal_id, old_stage = old.stage, new_stage = new_stage, "Moved deal");
-        Self::json_result(&deal)
+        json_result(&deal)
     }
 
     async fn handle_log_activity(&self, args: &serde_json::Value) -> CallToolResult {
-        let contact_id = match Self::get_str(args, "contact_id") {
+        let contact_id = match get_str(args, "contact_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
             },
             None => None,
         };
-        let deal_id = match Self::get_str(args, "deal_id") {
+        let deal_id = match get_str(args, "deal_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
             },
             None => None,
         };
-        let activity_type = match Self::get_str(args, "activity_type") {
+        let activity_type = match get_str(args, "activity_type") {
             Some(t) => t,
-            None => return Self::error_result("Missing required parameter: activity_type"),
+            None => return error_result("Missing required parameter: activity_type"),
         };
         if !VALID_ACTIVITY_TYPES.contains(&activity_type.as_str()) {
-            return Self::error_result(&format!(
+            return error_result(&format!(
                 "Invalid activity_type '{activity_type}'. Must be one of: {}",
                 VALID_ACTIVITY_TYPES.join(", ")
             ));
         }
-        let subject = Self::get_str(args, "subject");
-        let body = Self::get_str(args, "body");
+        let subject = get_str(args, "subject");
+        let body = get_str(args, "body");
 
         match sqlx::query_as::<_, Activity>(
             r#"INSERT INTO crm.activities (contact_id, deal_id, activity_type, subject, body)
@@ -678,14 +672,14 @@ impl CrmMcpServer {
         {
             Ok(activity) => {
                 info!(activity_type = activity_type, "Logged activity");
-                Self::json_result(&activity)
+                json_result(&activity)
             }
-            Err(e) => Self::error_result(&format!("Failed to log activity: {e}")),
+            Err(e) => error_result(&format!("Failed to log activity: {e}")),
         }
     }
 
     async fn handle_get_pipeline(&self, args: &serde_json::Value) -> CallToolResult {
-        let owner_id = match Self::get_str(args, "owner_id") {
+        let owner_id = match get_str(args, "owner_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
@@ -704,7 +698,7 @@ impl CrmMcpServer {
             .await
             {
                 Ok(r) => r,
-                Err(e) => return Self::error_result(&format!("Pipeline query failed: {e}")),
+                Err(e) => return error_result(&format!("Pipeline query failed: {e}")),
             }
         } else {
             match sqlx::query_as::<_, PipelineRow>(
@@ -716,25 +710,25 @@ impl CrmMcpServer {
             .await
             {
                 Ok(r) => r,
-                Err(e) => return Self::error_result(&format!("Pipeline query failed: {e}")),
+                Err(e) => return error_result(&format!("Pipeline query failed: {e}")),
             }
         };
 
-        Self::json_result(&rows)
+        json_result(&rows)
     }
 
     async fn handle_assign_contact(&self, args: &serde_json::Value) -> CallToolResult {
-        let contact_id_str = match Self::get_str(args, "contact_id") {
+        let contact_id_str = match get_str(args, "contact_id") {
             Some(s) => s,
-            None => return Self::error_result("Missing required parameter: contact_id"),
+            None => return error_result("Missing required parameter: contact_id"),
         };
         let contact_id = match Self::parse_uuid(&contact_id_str) {
             Ok(u) => u,
             Err(e) => return e,
         };
-        let owner_id_str = match Self::get_str(args, "owner_id") {
+        let owner_id_str = match get_str(args, "owner_id") {
             Some(s) => s,
-            None => return Self::error_result("Missing required parameter: owner_id"),
+            None => return error_result("Missing required parameter: owner_id"),
         };
         let owner_id = match Self::parse_uuid(&owner_id_str) {
             Ok(u) => u,
@@ -751,35 +745,35 @@ impl CrmMcpServer {
         {
             Ok(Some(contact)) => {
                 info!(contact_id = %contact_id, owner_id = %owner_id, "Assigned contact");
-                Self::json_result(&contact)
+                json_result(&contact)
             }
-            Ok(None) => Self::error_result(&format!("Contact '{contact_id}' not found")),
-            Err(e) => Self::error_result(&format!("Failed to assign contact: {e}")),
+            Ok(None) => error_result(&format!("Contact '{contact_id}' not found")),
+            Err(e) => error_result(&format!("Failed to assign contact: {e}")),
         }
     }
 
     async fn handle_create_task(&self, args: &serde_json::Value) -> CallToolResult {
-        let title = match Self::get_str(args, "title") {
+        let title = match get_str(args, "title") {
             Some(t) => t,
-            None => return Self::error_result("Missing required parameter: title"),
+            None => return error_result("Missing required parameter: title"),
         };
-        let contact_id = match Self::get_str(args, "contact_id") {
+        let contact_id = match get_str(args, "contact_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
             },
             None => None,
         };
-        let deal_id = match Self::get_str(args, "deal_id") {
+        let deal_id = match get_str(args, "deal_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
             },
             None => None,
         };
-        let due_date = Self::get_str(args, "due_date")
+        let due_date = get_str(args, "due_date")
             .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
-        let owner_id = match Self::get_str(args, "owner_id") {
+        let owner_id = match get_str(args, "owner_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
@@ -802,9 +796,9 @@ impl CrmMcpServer {
         {
             Ok(task) => {
                 info!(title = title, "Created task");
-                Self::json_result(&task)
+                json_result(&task)
             }
-            Err(e) => Self::error_result(&format!("Failed to create task: {e}")),
+            Err(e) => error_result(&format!("Failed to create task: {e}")),
         }
     }
 
@@ -812,7 +806,7 @@ impl CrmMcpServer {
         let contacts_arr = match args.get("contacts").and_then(|v| v.as_array()) {
             Some(a) => a,
             None => {
-                return Self::error_result(
+                return error_result(
                     "Missing required parameter: contacts (must be a JSON array)",
                 )
             }
@@ -869,7 +863,7 @@ impl CrmMcpServer {
         }
 
         info!(imported = imported, total = contacts_arr.len(), "Imported contacts");
-        Self::json_result(&serde_json::json!({
+        json_result(&serde_json::json!({
             "imported": imported,
             "total": contacts_arr.len(),
             "errors": errors
@@ -877,15 +871,15 @@ impl CrmMcpServer {
     }
 
     async fn handle_export_contacts(&self, args: &serde_json::Value) -> CallToolResult {
-        let stage = Self::get_str(args, "stage");
-        let owner_id = match Self::get_str(args, "owner_id") {
+        let stage = get_str(args, "stage");
+        let owner_id = match get_str(args, "owner_id") {
             Some(s) => match Self::parse_uuid(&s) {
                 Ok(u) => Some(u),
                 Err(e) => return e,
             },
             None => None,
         };
-        let tag = Self::get_str(args, "tag");
+        let tag = get_str(args, "tag");
 
         // Build dynamic query
         let mut sql = String::from("SELECT DISTINCT c.* FROM crm.contacts c");
@@ -946,9 +940,123 @@ impl CrmMcpServer {
         }
 
         match query.fetch_all(self.db.pool()).await {
-            Ok(contacts) => Self::json_result(&contacts),
-            Err(e) => Self::error_result(&format!("Export failed: {e}")),
+            Ok(contacts) => json_result(&contacts),
+            Err(e) => error_result(&format!("Export failed: {e}")),
         }
+    }
+
+    async fn handle_add_interaction(&self, args: &serde_json::Value) -> CallToolResult {
+        let contact_id_str = match get_str(args, "contact_id") {
+            Some(s) => s,
+            None => return error_result("Missing required parameter: contact_id"),
+        };
+        let contact_id = match Self::parse_uuid(&contact_id_str) {
+            Ok(u) => u,
+            Err(e) => return e,
+        };
+        let interaction_type = match get_str(args, "interaction_type") {
+            Some(t) => t,
+            None => return error_result("Missing required parameter: interaction_type"),
+        };
+
+        // Verify contact exists
+        let exists: Option<(uuid::Uuid,)> =
+            match sqlx::query_as("SELECT id FROM crm.contacts WHERE id = $1")
+                .bind(contact_id)
+                .fetch_optional(self.db.pool())
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => return error_result(&format!("Database error: {e}")),
+            };
+        if exists.is_none() {
+            return error_result(&format!("Contact '{contact_id}' not found"));
+        }
+
+        let subject = get_str(args, "subject");
+        let notes = get_str(args, "notes");
+
+        match sqlx::query_as::<_, ContactInteraction>(
+            "INSERT INTO crm.contact_interactions (contact_id, interaction_type, subject, notes) \
+             VALUES ($1, $2, $3, $4) RETURNING *",
+        )
+        .bind(contact_id)
+        .bind(&interaction_type)
+        .bind(&subject)
+        .bind(&notes)
+        .fetch_one(self.db.pool())
+        .await
+        {
+            Ok(interaction) => {
+                info!(contact_id = %contact_id, interaction_type = interaction_type, "Added interaction");
+                json_result(&interaction)
+            }
+            Err(e) => error_result(&format!("Failed to add interaction: {e}")),
+        }
+    }
+
+    async fn handle_tag_contact(&self, args: &serde_json::Value) -> CallToolResult {
+        let contact_id_str = match get_str(args, "contact_id") {
+            Some(s) => s,
+            None => return error_result("Missing required parameter: contact_id"),
+        };
+        let contact_id = match Self::parse_uuid(&contact_id_str) {
+            Ok(u) => u,
+            Err(e) => return e,
+        };
+
+        // Verify contact exists
+        let exists: Option<(uuid::Uuid,)> =
+            match sqlx::query_as("SELECT id FROM crm.contacts WHERE id = $1")
+                .bind(contact_id)
+                .fetch_optional(self.db.pool())
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => return error_result(&format!("Database error: {e}")),
+            };
+        if exists.is_none() {
+            return error_result(&format!("Contact '{contact_id}' not found"));
+        }
+
+        let add_tags = get_str_array(args, "add");
+        let remove_tags = get_str_array(args, "remove");
+
+        for tag in &add_tags {
+            let _ = sqlx::query(
+                "INSERT INTO crm.contact_tags (contact_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(contact_id)
+            .bind(tag)
+            .execute(self.db.pool())
+            .await;
+        }
+
+        for tag in &remove_tags {
+            let _ = sqlx::query(
+                "DELETE FROM crm.contact_tags WHERE contact_id = $1 AND tag = $2",
+            )
+            .bind(contact_id)
+            .bind(tag)
+            .execute(self.db.pool())
+            .await;
+        }
+
+        // Return current tags
+        let tags: Vec<ContactTag> = sqlx::query_as(
+            "SELECT * FROM crm.contact_tags WHERE contact_id = $1 ORDER BY tag",
+        )
+        .bind(contact_id)
+        .fetch_all(self.db.pool())
+        .await
+        .unwrap_or_default();
+
+        json_result(&serde_json::json!({
+            "contact_id": contact_id,
+            "tags": tags.iter().map(|t| &t.tag).collect::<Vec<_>>(),
+            "added": add_tags,
+            "removed": remove_tags
+        }))
     }
 }
 
@@ -1006,7 +1114,9 @@ impl ServerHandler for CrmMcpServer {
                 "create_task" => self.handle_create_task(&args).await,
                 "import_contacts" => self.handle_import_contacts(&args).await,
                 "export_contacts" => self.handle_export_contacts(&args).await,
-                _ => Self::error_result(&format!("Unknown tool: {}", request.name)),
+                "add_interaction" => self.handle_add_interaction(&args).await,
+                "tag_contact" => self.handle_tag_contact(&args).await,
+                _ => error_result(&format!("Unknown tool: {}", request.name)),
             };
 
             Ok(result)
