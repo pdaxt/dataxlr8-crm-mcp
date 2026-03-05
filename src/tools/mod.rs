@@ -34,7 +34,7 @@ pub struct Deal {
     pub title: String,
     pub contact_id: Option<uuid::Uuid>,
     pub stage: String,
-    pub value: Option<String>,
+    pub value: Option<f64>,
     pub owner_id: Option<uuid::Uuid>,
     pub expected_close: Option<chrono::NaiveDate>,
     pub notes: Option<String>,
@@ -88,7 +88,7 @@ pub struct ContactInteraction {
 pub struct PipelineRow {
     pub stage: String,
     pub deal_count: i64,
-    pub total_value: Option<String>,
+    pub total_value: Option<f64>,
 }
 
 fn build_tools() -> Vec<Tool> {
@@ -524,7 +524,7 @@ impl CrmMcpServer {
                    ON CONFLICT (title, contact_id) WHERE contact_id IS NOT NULL
                    DO UPDATE SET stage = EXCLUDED.stage, value = EXCLUDED.value, owner_id = EXCLUDED.owner_id,
                                  expected_close = EXCLUDED.expected_close, notes = EXCLUDED.notes, updated_at = now()
-                   RETURNING *"#,
+                   RETURNING id, title, contact_id, stage, value::DOUBLE PRECISION, owner_id, expected_close, notes, created_at, updated_at"#,
             )
             .bind(&title)
             .bind(&contact_id)
@@ -539,7 +539,7 @@ impl CrmMcpServer {
             sqlx::query_as::<_, Deal>(
                 r#"INSERT INTO crm.deals (title, contact_id, stage, value, owner_id, expected_close, notes)
                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                   RETURNING *"#,
+                   RETURNING id, title, contact_id, stage, value::DOUBLE PRECISION, owner_id, expected_close, notes, created_at, updated_at"#,
             )
             .bind(&title)
             .bind(&contact_id)
@@ -584,7 +584,7 @@ impl CrmMcpServer {
 
         // Get old stage for activity log
         let old: Option<Deal> = match sqlx::query_as(
-            "SELECT * FROM crm.deals WHERE id = $1",
+            "SELECT id, title, contact_id, stage, value::DOUBLE PRECISION, owner_id, expected_close, notes, created_at, updated_at FROM crm.deals WHERE id = $1",
         )
         .bind(deal_id)
         .fetch_optional(self.db.pool())
@@ -601,7 +601,7 @@ impl CrmMcpServer {
 
         // Update stage
         let deal: Deal = match sqlx::query_as(
-            "UPDATE crm.deals SET stage = $1, updated_at = now() WHERE id = $2 RETURNING *",
+            "UPDATE crm.deals SET stage = $1, updated_at = now() WHERE id = $2 RETURNING id, title, contact_id, stage, value::DOUBLE PRECISION, owner_id, expected_close, notes, created_at, updated_at",
         )
         .bind(&new_stage)
         .bind(deal_id)
@@ -689,7 +689,7 @@ impl CrmMcpServer {
 
         let rows: Vec<PipelineRow> = if let Some(oid) = owner_id {
             match sqlx::query_as::<_, PipelineRow>(
-                r#"SELECT stage, COUNT(*) as deal_count, SUM(value) as total_value
+                r#"SELECT stage, COUNT(*) as deal_count, SUM(value)::DOUBLE PRECISION as total_value
                    FROM crm.deals WHERE owner_id = $1
                    GROUP BY stage ORDER BY stage"#,
             )
@@ -702,7 +702,7 @@ impl CrmMcpServer {
             }
         } else {
             match sqlx::query_as::<_, PipelineRow>(
-                r#"SELECT stage, COUNT(*) as deal_count, SUM(value) as total_value
+                r#"SELECT stage, COUNT(*) as deal_count, SUM(value)::DOUBLE PRECISION as total_value
                    FROM crm.deals
                    GROUP BY stage ORDER BY stage"#,
             )
