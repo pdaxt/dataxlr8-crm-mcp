@@ -58,12 +58,33 @@ pub async fn setup_schema(pool: &PgPool) -> Result<()> {
             created_at TIMESTAMPTZ DEFAULT now()
         );
 
+        CREATE TABLE IF NOT EXISTS crm.contact_tags (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            contact_id UUID NOT NULL REFERENCES crm.contacts(id) ON DELETE CASCADE,
+            tag TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            UNIQUE (contact_id, tag)
+        );
+
+        CREATE TABLE IF NOT EXISTS crm.contact_interactions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            contact_id UUID NOT NULL REFERENCES crm.contacts(id) ON DELETE CASCADE,
+            interaction_type TEXT NOT NULL DEFAULT 'note'
+                CHECK (interaction_type IN ('call', 'email', 'meeting', 'note', 'other')),
+            subject TEXT,
+            notes TEXT,
+            occurred_at TIMESTAMPTZ DEFAULT now(),
+            created_at TIMESTAMPTZ DEFAULT now()
+        );
+
         CREATE INDEX IF NOT EXISTS idx_contacts_email ON crm.contacts(email);
         CREATE INDEX IF NOT EXISTS idx_contacts_company ON crm.contacts(company);
         CREATE INDEX IF NOT EXISTS idx_deals_stage ON crm.deals(stage);
         CREATE INDEX IF NOT EXISTS idx_deals_contact ON crm.deals(contact_id);
         CREATE INDEX IF NOT EXISTS idx_activities_contact ON crm.activities(contact_id);
         CREATE INDEX IF NOT EXISTS idx_tasks_owner ON crm.tasks(owner_id);
+        CREATE INDEX IF NOT EXISTS idx_contact_tags_contact ON crm.contact_tags(contact_id);
+        CREATE INDEX IF NOT EXISTS idx_contact_interactions_contact ON crm.contact_interactions(contact_id);
         "#,
     )
     .execute(pool)
