@@ -6,6 +6,12 @@ use rmcp::ServerHandler;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
+
+// ============================================================================
+// Validation constants
+// ============================================================================
+
+const MAX_QUERY_LEN: usize = 1000;
 // ============================================================================
 // Data types
 // ============================================================================
@@ -431,7 +437,12 @@ impl CrmMcpServer {
 
     async fn handle_search_contacts(&self, args: &serde_json::Value) -> CallToolResult {
         let query = match get_str(args, "query") {
-            Some(q) => q,
+            Some(q) => {
+                let trimmed = q.trim().to_string();
+                if trimmed.is_empty() { return error_result("Parameter 'query' must not be empty"); }
+                if trimmed.len() > MAX_QUERY_LEN { return error_result(&format!("'query' exceeds {} chars", MAX_QUERY_LEN)); }
+                trimmed
+            }
             None => return error_result("Missing required parameter: query"),
         };
         let tag = get_str(args, "tag");
